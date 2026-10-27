@@ -1,5 +1,18 @@
 ﻿param([switch]$NoUI, [switch]$SmokeTest, [string]$ProjectPath)
 
+function Resolve-GitPath {
+    $command = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:LOCALAPPDATA)) {
+        if (-not $base) { continue }
+        foreach ($relative in @('Git\cmd\git.exe', 'Programs\Git\cmd\git.exe')) {
+            $candidate = Join-Path $base $relative
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    throw '未找到 Git。请安装 Git for Windows 和 Git LFS，然后重新打开同步工具。'
+}
+
 if (-not ('RiftSync.LiveGit' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -69,6 +82,16 @@ $SyncWorker = {
         if ($r.Code -ne 0) { throw "$Label 失败（退出码 $($r.Code)），详细原因请看日志。" }
         return $r
     }
+    function Sync-FromOrigin([string]$Branch) {
+        $r = Step '获取主仓库更新' @('fetch','--progress','origin')
+        $remoteBranch = Run-Git @('show-ref','--verify','--quiet',"refs/remotes/origin/$Branch")
+        if ($remoteBranch.Code -eq 0) {
+            $r = Step '合并当前分支的远端更新' @('merge','--no-edit',"origin/$Branch")
+        } elseif ($remoteBranch.Code -ne 1) { throw '无法检查远端分支，已停止同步。' }
+        if ($Branch -ne 'main') {
+            $r = Step '合并主分支更新' @('merge','--no-edit','origin/main')
+        }
+    }
     try {
         if ($Mode -eq 'status') {
             Emit 'stage' '读取项目状态'
@@ -79,12 +102,17 @@ $SyncWorker = {
             return
         }
         if (Test-Path -LiteralPath (Join-Path $Root '.git/index.lock')) { throw '另一个 Git 操作正在使用项目，请等待它结束。' }
+        $branchResult = Step '检查当前工作分支' @('symbolic-ref','--quiet','--short','HEAD')
+        $branch = $branchResult.Text.Trim()
+        if ($Mode -eq 'push' -and $branch -in @('main','master')) {
+            throw '请先切换到自己的 feature 分支，再推送修改并创建 Pull Request。'
+        }
         if ($Mode -eq 'pull') {
             Emit 'stage' '检查本地修改'
             $dirty = Run-Git @('status','--porcelain')
             if ($dirty.Code -ne 0) { throw '无法检查本地修改，已停止拉取。' }
             if ($dirty.Text.Trim()) { throw '存在未提交的本地修改，请先推送或保存修改后再拉取。' }
-            $r = Step '拉取提交与合并更新' @('pull','--rebase','--progress','origin','main')
+            Sync-FromOrigin $branch
             $r = Step '下载大文件（Git LFS）' @('lfs','pull')
         } elseif ($Mode -eq 'push') {
             $r = Step '整理修改并准备大文件' @('add','--all')
@@ -95,16 +123,14 @@ $SyncWorker = {
             } elseif ($changes.Code -eq 0) {
                 Emit 'info' '没有新的文件修改，继续检查待上传提交。'
             } else { throw '无法读取待提交内容。' }
-            $remote = Step '连接 GitHub 并检查远端' @('ls-remote','--heads','origin','main')
-            if ($remote.Text -match '(?m)^[a-f0-9]+\s+refs/heads/main\s*$') {
-                $r = Step '同步远端提交' @('pull','--rebase','--progress','origin','main')
-            }
-            $r = Step '上传大文件与提交' @('push','--progress','-u','origin','main')
+            Sync-FromOrigin $branch
+            $r = Step '上传大文件与提交到当前分支' @('push','--progress','-u','origin',$branch)
             $head = Step '核对上传结果' @('rev-parse','HEAD')
-            $remote = Step '核对 GitHub 最新版本' @('ls-remote','--heads','origin','main')
+            $remote = Step '核对 GitHub 当前分支' @('ls-remote','--heads','origin',"refs/heads/$branch")
             $localHash = ($head.Text -split '\r?\n' | Where-Object { $_ -match '^[a-f0-9]{40,64}$' } | Select-Object -First 1)
-            $remoteHash = ($remote.Text -split '\r?\n' | Where-Object { $_ -match '^[a-f0-9]{40,64}\s+refs/heads/main\s*$' } | Select-Object -First 1) -split '\s+'
-            if (-not $localHash -or $remoteHash[0] -ne $localHash) { throw '远端提交与本地不一致，暂不能确认推送完成，请检查日志。' }
+            $remoteRefPattern = '^[a-f0-9]{40,64}\s+' + [regex]::Escape("refs/heads/$branch") + '\s*$'
+            $remoteHash = ($remote.Text -split '\r?\n' | Where-Object { $_ -match $remoteRefPattern } | Select-Object -First 1) -split '\s+'
+            if (-not $localHash -or -not $remoteHash -or $remoteHash[0] -ne $localHash) { throw '远端提交与本地不一致，暂不能确认推送完成，请检查日志。' }
         } else { throw "未知操作：$Mode" }
         Emit 'stage' '读取同步后的状态'
         $status = Run-Git @('status','--short','--branch')
@@ -134,7 +160,11 @@ Add-Type -AssemblyName System.Drawing
 if (-not $ProjectPath) { $ProjectPath = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ProjectRoot = [IO.Path]::GetFullPath($ProjectPath)
 $ToolPath = $MyInvocation.MyCommand.Path
-$GitPath = (Get-Command git -ErrorAction Stop).Source
+try { $GitPath = Resolve-GitPath }
+catch {
+    [void][System.Windows.Forms.MessageBox]::Show($_.Exception.Message, '项目同步', 'OK', 'Error')
+    return
+}
 $GitProxyArgs = @()
 try {
     $settings=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
