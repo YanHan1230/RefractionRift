@@ -1,0 +1,42 @@
+{
+  "Engine": "Unreal Engine 5.5.4, Epic installed build, Win64",
+  "Version": "1.1.0",
+  "Coverage": {
+    "NativeNodes": 299,
+    "EngineFunctions": 392,
+    "PinNames": 317,
+    "InventoryConcreteClasses": 299,
+    "NativeMenuClasses": 262
+  },
+  "AutomationSucceeded": 5,
+  "AutomationFailed": 0,
+  "Tests": [
+    {
+      "fullTestPath": "MaterialChineseHelper.DictionaryAndClasses",
+      "state": "Success",
+      "duration": 0.00604650005698204
+    },
+    {
+      "fullTestPath": "MaterialChineseHelper.NativeChineseSearch",
+      "state": "Success",
+      "duration": 0.00858299806714058
+    },
+    {
+      "fullTestPath": "MaterialChineseHelper.NativeCoverageInventory",
+      "state": "Success",
+      "duration": 0.026259001344442368
+    },
+    {
+      "fullTestPath": "MaterialChineseHelper.ParameterNamesPreserved",
+      "state": "Success",
+      "duration": 0.010072499513626099
+    },
+    {
+      "fullTestPath": "MaterialChineseHelper.StockWidgetTranslationAndRestore",
+      "state": "Success",
+      "duration": 0.01130569726228714
+    }
+  ],
+  "Installer": "Passed: Chinese path, fresh install, correct layout, upgrade, old dictionary and extra file backup, updated DLL, unrelated folder refused, project bytes unchanged.",
+  "Limitations": "NullRHI automation verifies native Slate widgets, native menu search and underlying data in a separate project. No full interactive acceptance in the user project."
+}

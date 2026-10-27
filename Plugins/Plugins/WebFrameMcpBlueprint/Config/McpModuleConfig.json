@@ -1,0 +1,11 @@
+﻿{
+  "module": "blueprint",
+  "displayName": "普通蓝图",
+  "version": 1,
+  "settings": {
+    "defaultListPath": "/Game",
+    "defaultListLimit": 100,
+    "autoCompileAfterGraphEdit": false,
+    "allowCustomClassChildren": true
+  }
+}

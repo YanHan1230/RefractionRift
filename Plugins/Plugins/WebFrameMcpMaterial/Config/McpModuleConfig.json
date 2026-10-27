@@ -1,0 +1,11 @@
+﻿{
+  "module": "material",
+  "displayName": "材质",
+  "version": 1,
+  "settings": {
+    "defaultListPath": "/Game",
+    "defaultListLimit": 100,
+    "compileAfterEdit": true,
+    "defaultNodeSpacing": 220
+  }
+}

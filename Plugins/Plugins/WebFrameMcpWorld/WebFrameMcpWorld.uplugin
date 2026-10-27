@@ -1,0 +1,26 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "WebFrame MCP World",
+	"Description": "Editor world MCP feature package for WebFrame MCP.",
+	"Category": "WebFrame",
+	"EngineVersion": "5.5.0",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "WebFrameMcpWorld",
+			"Type": "Editor",
+			"LoadingPhase": "PostDefault"
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "WebFrameMcp",
+			"Enabled": true
+		}
+	]
+}

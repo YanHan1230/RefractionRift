@@ -1,0 +1,16 @@
+{
+  "FileVersion": 3,
+  "Version": 110,
+  "VersionName": "1.1.0",
+  "FriendlyName": "Material Chinese Helper / 材质中文助手",
+  "Description": "Chinese and English material node labels, pin explanations and a searchable learning dictionary for Unreal Engine 5.5.",
+  "Category": "Editor",
+  "CreatedBy": "Material Chinese Helper",
+  "EngineVersion": "5.5.0",
+  "CanContainContent": false,
+  "EnabledByDefault": true,
+  "SupportedTargetPlatforms": ["Win64"],
+  "Modules": [
+    { "Name": "MaterialChineseHelper", "Type": "Editor", "LoadingPhase": "PostEngineInit", "PlatformAllowList": ["Win64"] }
+  ]
+}

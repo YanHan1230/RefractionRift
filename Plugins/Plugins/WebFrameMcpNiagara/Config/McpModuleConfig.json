@@ -1,0 +1,14 @@
+﻿{
+  "module": "niagara",
+  "displayName": "Niagara",
+  "version": 1,
+  "settings": {
+    "defaultListPath": "/Game",
+    "defaultListLimit": 100,
+    "createDefaultNodes": true,
+    "addDefaultEmitterModulesAndRenderers": true,
+    "compileAfterSystemEdit": true,
+    "defaultPresetPath": "/Game/Niagara",
+    "savePresetAssets": true
+  }
+}

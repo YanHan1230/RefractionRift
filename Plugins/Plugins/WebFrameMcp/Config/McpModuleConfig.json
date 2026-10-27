@@ -1,0 +1,10 @@
+﻿{
+  "module": "core",
+  "displayName": "核心",
+  "version": 1,
+  "settings": {
+    "logRetentionHours": 168,
+    "recordOperations": true,
+    "defaultPathPermissionMode": "unrestrictedUntilRulesExist"
+  }
+}

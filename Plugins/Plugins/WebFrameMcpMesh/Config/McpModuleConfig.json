@@ -1,0 +1,12 @@
+﻿{
+  "module": "mesh",
+  "displayName": "模型",
+  "version": 1,
+  "settings": {
+    "defaultListPath": "/Game",
+    "defaultGeometryLod": 0,
+    "defaultVertexLimit": 2000,
+    "defaultTriangleLimit": 1000,
+    "writeSkeletalSocketsToSkeleton": true
+  }
+}

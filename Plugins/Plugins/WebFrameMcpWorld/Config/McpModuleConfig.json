@@ -1,0 +1,12 @@
+﻿{
+	"module": "world",
+	"displayName": "编辑器世界",
+	"version": 1,
+	"settings":
+	{
+		"defaultActorListLimit": 200,
+		"geometryTriangleLimit": 1000,
+		"geometryVertexLimit": 2000,
+		"includeEditorOnlyActors": true
+	}
+}
