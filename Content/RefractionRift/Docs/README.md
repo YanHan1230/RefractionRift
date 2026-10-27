@@ -5,7 +5,24 @@
 UE 5.5、C++ 与蓝图混合的技术美术展示型独立游戏。
 核心展示：PBR、材质函数、Custom HLSL、溶解、扫描、Fresnel、Niagara、Lumen、性能分析。
 
-## Content 目录
+## 当前可运行资源
+
+所有项目资源位于 `/Game/RefractionRift`。
+
+- 玩家角色：`05_Blueprints/AnimationSystem/CBP_SandboxCharacter`
+- 动画蓝图：`05_Blueprints/AnimationSystem/ABP_SandboxCharacter`
+- 单角色游戏模式：`00_Core/GM_RefractionRift`
+- 启动关卡：`01_Levels/TestRoom/Levels_Demo`，保留原场景并加入玩家出生点
+- 增强输入：`00_Core/Input`
+- 模型、骨骼、动作匹配动画：`07_Characters/UEFN_Mannequin`
+- 动画压缩设置：`07_Characters/AnimationSettings`
+- 翻越检测依赖：`06_Environment/Traversal`
+- 脚步、落地音效：`08_Audio/Foley`
+
+已移除其他角色、角色切换控制器、示例 UI 和未引用资产，空目录按需重新建立。
+整理前备份位于项目外：`F:/RefractionRift/Backups/BeforeCleanup_20261027`。
+
+## 目录用途（后续需要时建立）
 
 - `00_Core`：项目级数据、输入、接口
 - `01_Levels`：关卡与测试房间
