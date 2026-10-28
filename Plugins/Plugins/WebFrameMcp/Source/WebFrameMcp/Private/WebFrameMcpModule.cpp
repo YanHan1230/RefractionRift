@@ -18,6 +18,9 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Selection.h"
+#include "Components/TextRenderComponent.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -36,6 +39,8 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "LevelEditor.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_CallArrayFunction.h"
 #include "K2Node_CustomEvent.h"
@@ -43,6 +48,7 @@
 #include "K2Node_MacroInstance.h"
 #include "K2Node_Event.h"
 #include "K2Node_Self.h"
+#include "K2Node_DynamicCast.h"
 #include "K2Node_CallParentFunction.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
@@ -4614,6 +4620,30 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::DispatchCommand(const FString& Metho
 		Result->SetBoolField(TEXT("playing"), GEditor->PlayWorld != nullptr);
 		return Result;
 	}
+	if (Method == TEXT("world.play.input"))
+	{
+		UWorld* PlayWorld = GEditor->PlayWorld;
+		APlayerController* PC = PlayWorld ? PlayWorld->GetFirstPlayerController() : nullptr;
+		if (!PC) { OutError = TEXT("No play world or local player controller"); return nullptr; }
+		const FString KeyText = Params->GetStringField(TEXT("key"));
+		const TCHAR* KeyBuffer = *KeyText;
+		FKey Key;
+		const bool bParsed = Key.ImportTextItem(KeyBuffer, PPF_None, PC, nullptr);
+		FString Action = TEXT("inspect"); Params->TryGetStringField(TEXT("action"), Action);
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("key"), Key.GetFName().ToString());
+		Result->SetBoolField(TEXT("valid"), bParsed && Key.IsValid());
+		if (Action != TEXT("inspect"))
+		{
+			if (!bParsed || !Key.IsValid()) { OutError = TEXT("Invalid key"); return nullptr; }
+			if (Action != TEXT("press") && Action != TEXT("release")) { OutError = TEXT("Use inspect, press or release"); return nullptr; }
+			const bool bPressed = Action == TEXT("press");
+			Result->SetBoolField(TEXT("handled"), PC->InputKey(FInputKeyParams(Key, bPressed ? IE_Pressed : IE_Released, bPressed ? 1.0 : 0.0)));
+		}
+		Result->SetBoolField(TEXT("down"), PC->IsInputKeyDown(Key));
+		Result->SetBoolField(TEXT("justPressed"), PC->WasInputKeyJustPressed(Key));
+		return Result;
+	}
 	if (Method == TEXT("world.play.actor"))
 	{
 		UWorld* PlayWorld = GEditor->PlayWorld;
@@ -4655,6 +4685,45 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::DispatchCommand(const FString& Metho
 				Result->SetStringField(PropName, Export);
 			}
 		}
+		return Result;
+	}
+
+	if (Method == TEXT("blueprint.component.add"))
+	{
+		UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *Params->GetStringField(TEXT("asset")));
+		UClass* Class = LoadObject<UClass>(nullptr, *Params->GetStringField(TEXT("class")));
+		if (!BP || !BP->SimpleConstructionScript || !Class || !Class->IsChildOf(UActorComponent::StaticClass()))
+		{ OutError = TEXT("Blueprint, SCS or component class missing"); return nullptr; }
+		const FName Name(*Params->GetStringField(TEXT("name")));
+		BP->Modify(); BP->SimpleConstructionScript->Modify();
+		USCS_Node* Node = BP->SimpleConstructionScript->FindSCSNode(Name);
+		if (!Node)
+		{
+			Node = BP->SimpleConstructionScript->CreateNode(Class, Name);
+			FString Parent; Params->TryGetStringField(TEXT("parent"), Parent);
+			USCS_Node* ParentNode = Parent.IsEmpty() ? nullptr : BP->SimpleConstructionScript->FindSCSNode(*Parent);
+			if (ParentNode) ParentNode->AddChildNode(Node);
+			else BP->SimpleConstructionScript->AddNode(Node);
+		}
+		UActorComponent* Template = Node->ComponentTemplate;
+		Template->Modify();
+		const TSharedPtr<FJsonObject>* Properties = nullptr;
+		if (Params->TryGetObjectField(TEXT("properties"), Properties))
+		{
+			for (const auto& Pair : (*Properties)->Values)
+			{
+				FProperty* Prop = Template->GetClass()->FindPropertyByName(*Pair.Key);
+				if (!Prop) { OutError = TEXT("Component property missing: ") + Pair.Key; return nullptr; }
+				const FString Value = Pair.Value->AsString();
+				if (!Prop->ImportText_InContainer(*Value, Template, Template, PPF_None))
+				{ OutError = TEXT("Component property import failed: ") + Pair.Key; return nullptr; }
+			}
+		}
+		Template->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
+		Result->SetStringField(TEXT("template"), Template->GetPathName());
 		return Result;
 	}
 	if (Method == TEXT("asset.property.get") || Method == TEXT("asset.property.set"))
@@ -6969,6 +7038,15 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 		else if (NodeKind == TEXT("Self"))
 		{
 			StructuralNode = NewObject<UK2Node_Self>(Graph);
+		}
+		else if (NodeKind == TEXT("DynamicCast"))
+		{
+			UClass* Target = LoadObject<UClass>(nullptr, *FunctionOwnerClassPath);
+			if (!Target) { OutError = TEXT("Cast target class not found"); return nullptr; }
+			UK2Node_DynamicCast* CastNode = NewObject<UK2Node_DynamicCast>(Graph);
+			CastNode->TargetType = Target;
+			CastNode->SetPurity(true);
+			StructuralNode = CastNode;
 		}
 		else if (NodeKind == TEXT("ForEachLoop"))
 		{
