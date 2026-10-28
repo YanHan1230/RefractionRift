@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WebFrameMcpModule.h"
 
@@ -18,6 +18,9 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Selection.h"
+#include "Components/TextRenderComponent.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "Engine/PostProcessVolume.h"
 #include "Engine/Scene.h"
 #include "Engine/World.h"
@@ -36,8 +39,17 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "LevelEditor.h"
 #include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerInput.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CallArrayFunction.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_IfThenElse.h"
+#include "K2Node_MacroInstance.h"
+#include "K2Node_Event.h"
+#include "K2Node_Self.h"
+#include "K2Node_DynamicCast.h"
+#include "K2Node_CallParentFunction.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
 #include "Materials/Material.h"
@@ -91,6 +103,7 @@
 #include "Widgets/Text/STextBlock.h"
 #include "Containers/Ticker.h"
 #include "Editor.h"
+#include "PlayInEditorDataTypes.h"
 #include "UObject/UnrealType.h"
 
 #include <initializer_list>
@@ -215,6 +228,7 @@ namespace WebFrameMcp
 		NodeJson->SetStringField(TEXT("id"), Node->NodeGuid.ToString(EGuidFormats::DigitsWithHyphens));
 		NodeJson->SetStringField(TEXT("class"), Node->GetClass()->GetPathName());
 		NodeJson->SetStringField(TEXT("title"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString());
+		NodeJson->SetStringField(TEXT("comment"), Node->NodeComment);
 		NodeJson->SetNumberField(TEXT("x"), Node->NodePosX);
 		NodeJson->SetNumberField(TEXT("y"), Node->NodePosY);
 
@@ -4591,6 +4605,167 @@ void FWebFrameMcpModule::SendResponse(INetworkingWebSocket* Peer, const FString&
 
 TSharedPtr<FJsonObject> FWebFrameMcpModule::DispatchCommand(const FString& Method, const TSharedPtr<FJsonObject>& Params, FString& OutError)
 {
+	if (Method == TEXT("editor.play"))
+	{
+		const FString Action = Params->GetStringField(TEXT("action"));
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		if (Action == TEXT("start"))
+		{
+			if (GEditor->PlayWorld) { OutError = TEXT("Play session already running"); return nullptr; }
+			FRequestPlaySessionParams PlayParams;
+			PlayParams.WorldType = EPlaySessionWorldType::PlayInEditor;
+			GEditor->RequestPlaySession(PlayParams);
+		}
+		else if (Action == TEXT("stop")) { GEditor->RequestEndPlayMap(); }
+		Result->SetBoolField(TEXT("playing"), GEditor->PlayWorld != nullptr);
+		return Result;
+	}
+	if (Method == TEXT("world.play.input"))
+	{
+		UWorld* PlayWorld = GEditor->PlayWorld;
+		APlayerController* PC = PlayWorld ? PlayWorld->GetFirstPlayerController() : nullptr;
+		if (!PC) { OutError = TEXT("No play world or local player controller"); return nullptr; }
+		const FString KeyText = Params->GetStringField(TEXT("key"));
+		const TCHAR* KeyBuffer = *KeyText;
+		FKey Key;
+		const bool bParsed = Key.ImportTextItem(KeyBuffer, PPF_None, PC, nullptr);
+		FString Action = TEXT("inspect"); Params->TryGetStringField(TEXT("action"), Action);
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("key"), Key.GetFName().ToString());
+		Result->SetBoolField(TEXT("valid"), bParsed && Key.IsValid());
+		if (Action != TEXT("inspect"))
+		{
+			if (!bParsed || !Key.IsValid()) { OutError = TEXT("Invalid key"); return nullptr; }
+			if (Action != TEXT("press") && Action != TEXT("release")) { OutError = TEXT("Use inspect, press or release"); return nullptr; }
+			const bool bPressed = Action == TEXT("press");
+			Result->SetBoolField(TEXT("handled"), PC->InputKey(FInputKeyParams(Key, bPressed ? IE_Pressed : IE_Released, bPressed ? 1.0 : 0.0)));
+		}
+		Result->SetBoolField(TEXT("down"), PC->IsInputKeyDown(Key));
+		Result->SetBoolField(TEXT("justPressed"), PC->WasInputKeyJustPressed(Key));
+		return Result;
+	}
+	if (Method == TEXT("world.play.actor"))
+	{
+		UWorld* PlayWorld = GEditor->PlayWorld;
+		if (!PlayWorld) { OutError = TEXT("No play world"); return nullptr; }
+		FString Name; Params->TryGetStringField(TEXT("name"), Name);
+		FString ClassPath; Params->TryGetStringField(TEXT("class"), ClassPath);
+		UClass* ActorClass = ClassPath.IsEmpty() ? nullptr : LoadObject<UClass>(nullptr, *ClassPath);
+		AActor* Actor = nullptr;
+		for (TActorIterator<AActor> It(PlayWorld); It; ++It)
+		{ if ((!Name.IsEmpty() && (It->GetName() == Name || It->GetActorLabel() == Name)) || (ActorClass && It->IsA(ActorClass))) { Actor = *It; break; } }
+		if (!Actor) { OutError = TEXT("Runtime actor not found"); return nullptr; }
+		UObject* Object = Actor;
+		FString ComponentName;
+		if (Params->TryGetStringField(TEXT("component"), ComponentName))
+		{
+			TInlineComponentArray<UActorComponent*> Components(Actor);
+			Object = nullptr;
+			for (UActorComponent* C : Components) if (C->GetName() == ComponentName) { Object = C; break; }
+			if (!Object) { OutError = TEXT("Component not found"); return nullptr; }
+		}
+		FString Function;
+		if (Params->TryGetStringField(TEXT("invoke"), Function))
+		{
+			UFunction* Fn = Object->FindFunction(FName(*Function));
+			if (!Fn || Fn->ParmsSize) { OutError = TEXT("Function missing or requires parameters"); return nullptr; }
+			Object->ProcessEvent(Fn, nullptr);
+		}
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("actor"), Actor->GetPathName());
+		const TArray<TSharedPtr<FJsonValue>>* Properties = nullptr;
+		if (Params->TryGetArrayField(TEXT("properties"), Properties))
+		{
+			for (const auto& V : *Properties)
+			{
+				const FString PropName = V->AsString();
+				FProperty* Prop = Object->GetClass()->FindPropertyByName(FName(*PropName));
+				if (!Prop) { OutError = FString::Printf(TEXT("Property missing: %s"), *PropName); return nullptr; }
+				FString Export; Prop->ExportText_InContainer(0, Export, Object, Object, Object, PPF_None);
+				Result->SetStringField(PropName, Export);
+			}
+		}
+		return Result;
+	}
+
+	if (Method == TEXT("blueprint.component.add"))
+	{
+		UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *Params->GetStringField(TEXT("asset")));
+		UClass* Class = LoadObject<UClass>(nullptr, *Params->GetStringField(TEXT("class")));
+		if (!BP || !BP->SimpleConstructionScript || !Class || !Class->IsChildOf(UActorComponent::StaticClass()))
+		{ OutError = TEXT("Blueprint, SCS or component class missing"); return nullptr; }
+		const FName Name(*Params->GetStringField(TEXT("name")));
+		BP->Modify(); BP->SimpleConstructionScript->Modify();
+		USCS_Node* Node = BP->SimpleConstructionScript->FindSCSNode(Name);
+		if (!Node)
+		{
+			Node = BP->SimpleConstructionScript->CreateNode(Class, Name);
+			FString Parent; Params->TryGetStringField(TEXT("parent"), Parent);
+			USCS_Node* ParentNode = Parent.IsEmpty() ? nullptr : BP->SimpleConstructionScript->FindSCSNode(*Parent);
+			if (ParentNode) ParentNode->AddChildNode(Node);
+			else BP->SimpleConstructionScript->AddNode(Node);
+		}
+		UActorComponent* Template = Node->ComponentTemplate;
+		Template->Modify();
+		const TSharedPtr<FJsonObject>* Properties = nullptr;
+		if (Params->TryGetObjectField(TEXT("properties"), Properties))
+		{
+			for (const auto& Pair : (*Properties)->Values)
+			{
+				FProperty* Prop = Template->GetClass()->FindPropertyByName(*Pair.Key);
+				if (!Prop) { OutError = TEXT("Component property missing: ") + Pair.Key; return nullptr; }
+				const FString Value = Pair.Value->AsString();
+				if (!Prop->ImportText_InContainer(*Value, Template, Template, PPF_None))
+				{ OutError = TEXT("Component property import failed: ") + Pair.Key; return nullptr; }
+			}
+		}
+		Template->PostEditChange();
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("name"), Node->GetVariableName().ToString());
+		Result->SetStringField(TEXT("template"), Template->GetPathName());
+		return Result;
+	}
+	if (Method == TEXT("asset.property.get") || Method == TEXT("asset.property.set"))
+	{
+		FString AssetPath = Params->GetStringField(TEXT("asset"));
+		UObject* Object = LoadObject<UObject>(nullptr, *AssetPath);
+		if (!Object) { OutError = TEXT("Asset not found"); return nullptr; }
+		FString PropertyName = Params->GetStringField(TEXT("property"));
+		FProperty* Property = Object->GetClass()->FindPropertyByName(FName(*PropertyName));
+		if (!Property) { OutError = TEXT("Property not found"); return nullptr; }
+		FString Value;
+		Property->ExportText_InContainer(0, Value, Object, Object, Object, PPF_None);
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("oldValue"), Value);
+		if (Method == TEXT("asset.property.set"))
+		{
+			Object->Modify();
+			const FString NewValue = Params->GetStringField(TEXT("value"));
+			if (!Property->ImportText_InContainer(*NewValue, Object, Object, PPF_None))
+			{ OutError = TEXT("Property import failed"); return nullptr; }
+			Object->PostEditChange();
+			Object->MarkPackageDirty();
+			bool bSave = false; Params->TryGetBoolField(TEXT("save"), bSave);
+			if (bSave && !UEditorLoadingAndSavingUtils::SavePackages({ Object->GetOutermost() }, false))
+			{ OutError = TEXT("Asset save failed"); return nullptr; }
+			Value.Reset(); Property->ExportText_InContainer(0, Value, Object, Object, Object, PPF_None);
+		}
+		Result->SetStringField(TEXT("value"), Value);
+		Result->SetStringField(TEXT("class"), Object->GetClass()->GetPathName());
+		return Result;
+	}
+	if (Method == TEXT("blueprint.node.annotate"))
+	{
+		UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Params->GetStringField(TEXT("asset")));
+		UEdGraphNode* Node = Blueprint ? WebFrameMcp::FindNodeByGuid(Blueprint, Params->GetStringField(TEXT("nodeId"))) : nullptr;
+		if (!Node) { OutError = TEXT("Node not found"); return nullptr; }
+		Node->Modify(); Node->NodeComment = Params->GetStringField(TEXT("text"));
+		Node->bCommentBubbleVisible = true;
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		Node->GetGraph()->NotifyGraphChanged();
+		return WebFrameMcp::NodeToJson(Node);
+	}
 	if (Method == TEXT("ping") || Method == TEXT("mcp.ping"))
 	{
 		TSharedPtr<FJsonObject> Pong = MakeShared<FJsonObject>();
@@ -6637,7 +6812,10 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::SetBlueprintPinDefault(const TShared
 	}
 
 	const FString OldValue = Pin->GetDefaultAsString();
-	const FString ValidationError = Schema->IsPinDefaultValid(Pin, DefaultValue, nullptr, FText::GetEmpty());
+	const bool bObjectPin = Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Object || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Class || Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Interface;
+	UObject* DefaultObject = bObjectPin && !DefaultValue.IsEmpty() && DefaultValue != TEXT("None") ? LoadObject<UObject>(nullptr, *DefaultValue) : nullptr;
+	if (bObjectPin && !DefaultObject && !DefaultValue.IsEmpty() && DefaultValue != TEXT("None")) { OutError = TEXT("Default object not found"); return nullptr; }
+	const FString ValidationError = Schema->IsPinDefaultValid(Pin, bObjectPin ? FString() : DefaultValue, DefaultObject, FText::GetEmpty());
 	if (!ValidationError.IsEmpty())
 	{
 		OutError = ValidationError;
@@ -6645,7 +6823,8 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::SetBlueprintPinDefault(const TShared
 	}
 
 	Node->Modify();
-	Schema->TrySetDefaultValue(*Pin, DefaultValue, true);
+	if (bObjectPin) Schema->TrySetDefaultObject(*Pin, DefaultObject, true);
+	else Schema->TrySetDefaultValue(*Pin, DefaultValue, true);
 	if (UEdGraph* Graph = Node->GetGraph())
 	{
 		Graph->NotifyGraphChanged();
@@ -6808,6 +6987,7 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 	FString GraphPath;
 	FString FunctionName;
 	FString FunctionOwnerClassPath;
+	FString NodeKind;
 	double X = 0.0;
 	double Y = 0.0;
 	if (Params.IsValid())
@@ -6817,6 +6997,7 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 		Params->TryGetStringField(TEXT("graphPath"), GraphPath);
 		Params->TryGetStringField(TEXT("functionName"), FunctionName);
 		Params->TryGetStringField(TEXT("functionOwnerClass"), FunctionOwnerClassPath);
+		Params->TryGetStringField(TEXT("nodeKind"), NodeKind);
 		Params->TryGetNumberField(TEXT("x"), X);
 		Params->TryGetNumberField(TEXT("y"), Y);
 	}
@@ -6825,7 +7006,7 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 		OutError = TEXT("Missing params.asset.");
 		return nullptr;
 	}
-	if (FunctionName.IsEmpty())
+	if (FunctionName.IsEmpty() && NodeKind.IsEmpty())
 	{
 		OutError = TEXT("Missing params.functionName.");
 		return nullptr;
@@ -6843,6 +7024,85 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 	{
 		OutError = FString::Printf(TEXT("Graph not found: %s%s%s"), *GraphName, GraphName.IsEmpty() || GraphPath.IsEmpty() ? TEXT("") : TEXT(" / "), *GraphPath);
 		return nullptr;
+	}
+
+	// Structural K2 nodes complement regular function calls without importing arbitrary objects.
+	if (!NodeKind.IsEmpty())
+	{
+		UEdGraphNode* StructuralNode = nullptr;
+		Graph->Modify();
+		if (NodeKind == TEXT("Branch"))
+		{
+			StructuralNode = NewObject<UK2Node_IfThenElse>(Graph);
+		}
+		else if (NodeKind == TEXT("Self"))
+		{
+			StructuralNode = NewObject<UK2Node_Self>(Graph);
+		}
+		else if (NodeKind == TEXT("DynamicCast"))
+		{
+			UClass* Target = LoadObject<UClass>(nullptr, *FunctionOwnerClassPath);
+			if (!Target) { OutError = TEXT("Cast target class not found"); return nullptr; }
+			UK2Node_DynamicCast* CastNode = NewObject<UK2Node_DynamicCast>(Graph);
+			CastNode->TargetType = Target;
+			CastNode->SetPurity(true);
+			StructuralNode = CastNode;
+		}
+		else if (NodeKind == TEXT("ForEachLoop"))
+		{
+			UBlueprint* Macros = LoadObject<UBlueprint>(nullptr, TEXT("/Engine/EditorBlueprintResources/StandardMacros.StandardMacros"));
+			UEdGraph* MacroGraph = Macros ? WebFrameMcp::FindGraph(Macros, TEXT("ForEachLoop"), FString()) : nullptr;
+			if (!MacroGraph)
+			{
+				OutError = TEXT("Engine ForEachLoop macro not found.");
+				return nullptr;
+			}
+			UK2Node_MacroInstance* Macro = NewObject<UK2Node_MacroInstance>(Graph);
+			Macro->SetMacroGraph(MacroGraph);
+			StructuralNode = Macro;
+		}
+		else if (NodeKind == TEXT("Event") || NodeKind == TEXT("ParentCall"))
+		{
+			UFunction* ParentFunction = Blueprint->ParentClass ? Blueprint->ParentClass->FindFunctionByName(*FunctionName) : nullptr;
+			if (!ParentFunction)
+			{
+				OutError = TEXT("Parent event/function not found.");
+				return nullptr;
+			}
+			if (NodeKind == TEXT("Event"))
+			{
+				UK2Node_Event* Event = NewObject<UK2Node_Event>(Graph);
+				Event->EventReference.SetExternalMember(*FunctionName, ParentFunction->GetOwnerClass());
+				Event->bOverrideFunction = true;
+				StructuralNode = Event;
+			}
+			else
+			{
+				UK2Node_CallParentFunction* Parent = NewObject<UK2Node_CallParentFunction>(Graph);
+				Parent->SetFromFunction(ParentFunction);
+				StructuralNode = Parent;
+			}
+		}
+		if (!StructuralNode)
+		{
+			OutError = TEXT("Unsupported nodeKind. Use Branch, Self, ForEachLoop, Event, or ParentCall.");
+			return nullptr;
+		}
+		StructuralNode->SetFlags(RF_Transactional);
+		Graph->AddNode(StructuralNode, false, false);
+		StructuralNode->CreateNewGuid();
+		StructuralNode->PostPlacedNewNode();
+		StructuralNode->AllocateDefaultPins();
+		StructuralNode->NodePosX = FMath::RoundToInt(X);
+		StructuralNode->NodePosY = FMath::RoundToInt(Y);
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+		Graph->NotifyGraphChanged();
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("asset"), Blueprint->GetPathName());
+		Result->SetStringField(TEXT("graph"), Graph->GetPathName());
+		Result->SetObjectField(TEXT("node"), WebFrameMcp::NodeToJson(StructuralNode));
+		Result->SetStringField(TEXT("nodeKind"), NodeKind);
+		return Result;
 	}
 
 	UClass* FunctionOwnerClass = Blueprint->GeneratedClass ? Blueprint->GeneratedClass : Blueprint->ParentClass;
@@ -6869,13 +7129,26 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCallFunctionNode(cons
 	}
 
 	Graph->Modify();
-	FGraphNodeCreator<UK2Node_CallFunction> NodeCreator(*Graph);
-	UK2Node_CallFunction* Node = NodeCreator.CreateNode();
-	Node->SetFromFunction(Function);
-	Node->NodePosX = FMath::RoundToInt(X);
-	Node->NodePosY = FMath::RoundToInt(Y);
-	NodeCreator.Finalize();
-	Node->AllocateDefaultPins();
+	UK2Node_CallFunction* Node = nullptr;
+	if (Function->HasMetaData(TEXT("ArrayParm")))
+	{
+		FGraphNodeCreator<UK2Node_CallArrayFunction> NodeCreator(*Graph);
+		UK2Node_CallArrayFunction* ArrayNode = NodeCreator.CreateNode();
+		ArrayNode->SetFromFunction(Function);
+		ArrayNode->NodePosX = FMath::RoundToInt(X);
+		ArrayNode->NodePosY = FMath::RoundToInt(Y);
+		NodeCreator.Finalize();
+		Node = ArrayNode;
+	}
+	else
+	{
+		FGraphNodeCreator<UK2Node_CallFunction> NodeCreator(*Graph);
+		Node = NodeCreator.CreateNode();
+		Node->SetFromFunction(Function);
+		Node->NodePosX = FMath::RoundToInt(X);
+		Node->NodePosY = FMath::RoundToInt(Y);
+		NodeCreator.Finalize();
+	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 	Graph->NotifyGraphChanged();
@@ -6961,7 +7234,6 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCustomEventNode(const
 	Node->NodePosX = FMath::RoundToInt(X);
 	Node->NodePosY = FMath::RoundToInt(Y);
 	NodeCreator.Finalize();
-	Node->AllocateDefaultPins();
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 	Graph->NotifyGraphChanged();
@@ -7043,8 +7315,8 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintCommentNode(const TSh
 	Node->NodePosY = FMath::RoundToInt(Y);
 	Node->NodeWidth = FMath::RoundToInt(Width);
 	Node->NodeHeight = FMath::RoundToInt(Height);
-	Node->NodeComment = Text;
 	NodeCreator.Finalize();
+	Node->NodeComment = Text;
 
 	FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 	Graph->NotifyGraphChanged();
@@ -7131,6 +7403,12 @@ TSharedPtr<FJsonObject> FWebFrameMcpModule::CreateBlueprintVariableNode(const TS
 		return nullptr;
 	}
 
+	FString OwnerClass;
+	if (Params->TryGetStringField(TEXT("ownerClass"), OwnerClass))
+	{
+		Source = LoadObject<UClass>(nullptr, *OwnerClass);
+		if (!Source) { OutError = TEXT("Variable owner class not found"); return nullptr; }
+	}
 	Graph->Modify();
 	UEdGraphNode* Node = bSetter
 		? Cast<UEdGraphNode>(Schema->SpawnVariableSetNode(FVector2D(X, Y), Graph, FName(*VariableName), Source))
